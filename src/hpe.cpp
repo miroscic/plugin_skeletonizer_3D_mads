@@ -52,7 +52,7 @@
 #endif
 
 #ifdef KINECT_AZURE
-#pragma message("Kinect Azure is enabled")
+#pragma message("This computer has the Kinect Azure SDK installed.")
 // include Kinect libraries
 #include <k4a/k4a.h>
 #include <k4a/k4a.hpp>
@@ -73,18 +73,19 @@ struct color_point_t {
 };
 
 // Map of OpenPOSE keypoint names
-// TODO: update with Miroscic names
-map<int, string> keypoints_map = {
-    {0, "NOS_"},  {1, "NEC_"},  {2, "SHOR"},  {3, "ELBR"},  {4, "WRIR"},
-    {5, "SHOL"},  {6, "ELBL"},  {7, "WRIL"},  {8, "HIPR"},  {9, "KNER"},
-    {10, "ANKR"}, {11, "HIPL"}, {12, "KNEL"}, {13, "ANKL"}, {14, "EYER"},
-    {15, "EYEL"}, {16, "EARR"}, {17, "EARL"}};
+
+map<int, string> keypoints_map_openpose = {
+  {0, "NOS_"},  {1, "NEC_"},  {2, "SHOR"},  {3, "ELBR"},  {4, "WRIR"},
+  {5, "SHOL"},  {6, "ELBL"},  {7, "WRIL"},  {8, "HIPR"},  {9, "KNER"},
+  {10, "ANKR"}, {11, "HIPL"}, {12, "KNEL"}, {13, "ANKL"}, {14, "EYER"},
+  {15, "EYEL"}, {16, "EARR"}, {17, "EARL"}};
 
 map<int, string> keypoints_map_azure = {
-    {27, "NOS_"}, {3, "NEC_"},  {12, "SHOR"}, {13, "ELBR"}, {14, "WRIR"},
-    {5, "SHOL"},  {6, "ELBL"},  {7, "WRIL"},  {22, "HIPR"}, {23, "KNER"},
-    {24, "ANKR"}, {18, "HIPL"}, {19, "KNEL"}, {20, "ANKL"}, {30, "EYER"},
-    {28, "EYEL"}, {31, "EARR"}, {29, "EARL"}};
+  {27, "NOS_"}, {3, "NEC_"},  {12, "SHOR"}, {13, "ELBR"}, {14, "WRIR"},
+  {5, "SHOL"},  {6, "ELBL"},  {7, "WRIL"},  {22, "HIPR"}, {23, "KNER"},
+  {24, "ANKR"}, {18, "HIPL"}, {19, "KNEL"}, {20, "ANKL"}, {30, "EYER"},
+  {28, "EYEL"}, {31, "EARR"}, {29, "EARL"}};
+
 
 /**
  * @class Skeletonizer3D
@@ -206,7 +207,7 @@ public:
 #ifdef KINECT_AZURE
     _device.stop_cameras();
     _device.close();
-#else
+#elif __linux
     if (is_raspberry_pi()) {
       _camera.stopVideo();
     }
@@ -248,6 +249,20 @@ public:
     return false;
   }
 
+  bool is_kinect(){
+#ifdef KINECT_AZURE
+      uint32_t device_count = k4a_device_get_installed_count();
+      if( device_count > 0){
+        return true;
+      }
+      else{
+        return false;
+      }
+#endif
+      return false; 
+
+  }
+
   /* COMMON METHODS ***********************************************************/
 
   void setup_VideoCapture() {
@@ -267,62 +282,65 @@ public:
       acquire_frame(_dummy);
     } else {
 #ifdef KINECT_AZURE
-      _device_config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
-      _device_config.color_format =
-          K4A_IMAGE_FORMAT_COLOR_BGRA32; // <==== For Color image
-      _device_config.color_resolution = K4A_COLOR_RESOLUTION_720P;
-      _device_config.depth_mode =
-          K4A_DEPTH_MODE_NFOV_UNBINNED; // <==== For Depth image
+      if (is_kinect()) {
+        _device_config = K4A_DEVICE_CONFIG_INIT_DISABLE_ALL;
+        _device_config.color_format =
+            K4A_IMAGE_FORMAT_COLOR_BGRA32; // <==== For Color image
+        _device_config.color_resolution = K4A_COLOR_RESOLUTION_720P;
+        _device_config.depth_mode =
+            K4A_DEPTH_MODE_NFOV_UNBINNED; // <==== For Depth image
 
-      if (_params.contains("azure_device")) {
-        _azure_device = _params["azure_device"];
-        cout << "   Camera id: " << _azure_device << endl;
-      } else {
-        cout << "   Camera id (default): " << _azure_device << endl;
+        if (_params.contains("azure_device")) {
+          _azure_device = _params["azure_device"];
+          cout << "   Camera id: " << _azure_device << endl;
+        } else {
+          cout << "   Camera id (default): " << _azure_device << endl;
+        }
+
+        _device = k4a::device::open(_azure_device);
+        _device.start_cameras(&_device_config);
+
+        k4a::calibration sensor_calibration = _device.get_calibration(
+            _device_config.depth_mode, _device_config.color_resolution);
+        cout << "   Camera calibrated!" << endl;
+
+        _pc_transformation = k4a_transformation_create(&sensor_calibration);
+
+        // colorAzure_intrinsics =
+        // sensor_calibration.get_color_camera_calibration().intrinsics; // CHECK
+        // HOW TO DO
+
+        k4abt_tracker_configuration_t trackerConfig =
+            K4ABT_TRACKER_CONFIG_DEFAULT;
+        if (_params.contains("CUDA")) {
+          cout << "   Body tracker CUDA processor enabled: " << _params["CUDA"]
+              << endl;
+          if (_params["CUDA"] == true)
+            trackerConfig.processing_mode =
+                K4ABT_TRACKER_PROCESSING_MODE_GPU_CUDA;
+        }
+        _tracker = k4abt::tracker::create(sensor_calibration, trackerConfig);
+
+        // acquire a frame just to get the resolution
+        _device.get_capture(&_k4a_rgbd,
+                            std::chrono::milliseconds(K4A_WAIT_INFINITE));
+
+        k4a::image colorImage = _k4a_rgbd.get_color_image();
+
+        // from k4a::image to cv::Mat --> color image
+        if (colorImage != NULL) {
+          // get raw buffer
+          uint8_t *buffer = colorImage.get_buffer();
+
+          // convert the raw buffer to cv::Mat
+          int rows = colorImage.get_height_pixels();
+          int cols = colorImage.get_width_pixels();
+          _rgb = cv::Mat(rows, cols, CV_8UC4, (void *)buffer, cv::Mat::AUTO_STEP);
+          cvtColor(_rgb, _rgb, cv::COLOR_BGRA2BGR);
+        }
       }
 
-      _device = k4a::device::open(_azure_device);
-      _device.start_cameras(&_device_config);
-
-      k4a::calibration sensor_calibration = _device.get_calibration(
-          _device_config.depth_mode, _device_config.color_resolution);
-      cout << "   Camera calibrated!" << endl;
-
-      _pc_transformation = k4a_transformation_create(&sensor_calibration);
-
-      // colorAzure_intrinsics =
-      // sensor_calibration.get_color_camera_calibration().intrinsics; // CHECK
-      // HOT TO DO
-
-      k4abt_tracker_configuration_t trackerConfig =
-          K4ABT_TRACKER_CONFIG_DEFAULT;
-      if (_params.contains("CUDA")) {
-        cout << "   Body tracker CUDA processor enabled: " << _params["CUDA"]
-             << endl;
-        if (_params["CUDA"] == true)
-          trackerConfig.processing_mode =
-              K4ABT_TRACKER_PROCESSING_MODE_GPU_CUDA;
-      }
-      _tracker = k4abt::tracker::create(sensor_calibration, trackerConfig);
-
-      // acquire a frame just to get the resolution
-      _device.get_capture(&_k4a_rgbd,
-                          std::chrono::milliseconds(K4A_WAIT_INFINITE));
-
-      k4a::image colorImage = _k4a_rgbd.get_color_image();
-
-      // from k4a::image to cv::Mat --> color image
-      if (colorImage != NULL) {
-        // get raw buffer
-        uint8_t *buffer = colorImage.get_buffer();
-
-        // convert the raw buffer to cv::Mat
-        int rows = colorImage.get_height_pixels();
-        int cols = colorImage.get_width_pixels();
-        _rgb = cv::Mat(rows, cols, CV_8UC4, (void *)buffer, cv::Mat::AUTO_STEP);
-        cvtColor(_rgb, _rgb, cv::COLOR_BGRA2BGR);
-      }
-#else
+#elif __linux
       if (is_raspberry_pi()) {
         std::cout << "It is running on a Raspi" << std::endl;
         _camera.options->video_width = rgb_width_read;   // 1280;
@@ -371,7 +389,7 @@ public:
     _rgb_width = resolution.width;   //_rgb.cols;
     cout << "   RGB Camera resolution: " << _rgb_width << "x" << _rgb_height
          << endl;
-
+  }
 #ifdef KINECT_AZURE
     return_type create_point_cloud(k4a_transformation_t transformation_handle,
                                    const k4a_image_t depth_image,
@@ -536,7 +554,7 @@ public:
     }
 
 #endif
-  }
+  
 
   /**
    * @brief Acquire a frame from a camera device. Camera ID is defined in the
@@ -555,8 +573,11 @@ public:
     // and translate the frame in OpenCV format
 
     if (dummy) {
+      /*
       static string folder_path =
-          "/home/mads/Desktop/DUMMYCOV3D"; // CHANGE PATH
+          "/home/mads/Desktop/DUMMYCOV3D"; // CHANGE PATH */
+
+      static string folder_path = "G:/Shared drives/MirrorWorld/Test/20241113/02_preprocessing/azure/sub_1_cond_5_run_1/DUMMYCOV3D_000515315312";    
 
       // LOAD JSON (joints positions)
       static json frames_json;
@@ -658,8 +679,41 @@ public:
           cout << "ERROR: Failed to load image" << endl;
           return return_type::error;
         } else {
-          cout << "INFO: Loaded image: " << image_files[current_index] << endl;
+          // cout << "INFO: Loaded image: " << image_files[current_index] << endl;
         }
+
+        // ADD BLACK BORDERS TO AVOID TWO PEOPLE IN THE IMAGE
+        int centerX = _rgb.cols / 2;
+        int centerY = _rgb.rows / 2;
+        int width = 450;  // Width of the center region to keep
+        int height = 600; // Height of the center region to keep
+
+        // Ensure the region is within the image bounds
+        int x1 = max(0, centerX - width / 2);
+        int y1 = max(0, centerY - height / 2);
+        int x2 = min(_rgb.cols, centerX + width / 2);
+        int y2 = min(_rgb.rows, centerY + height / 2);
+
+        // Create a copy of the image
+        Mat _rgb_clone = _rgb.clone();
+
+        // Draw black rectangles on the borders
+        // Top rectangle
+        rectangle(_rgb_clone, cv::Point(0, 0), cv::Point(_rgb.cols, y1), cv::Scalar(0, 0, 0), -1);
+        // Bottom rectangle
+        rectangle(_rgb_clone, cv::Point(0, y2), cv::Point(_rgb.cols, _rgb.rows), cv::Scalar(0, 0, 0), -1);
+        // Left rectangle
+        rectangle(_rgb_clone, cv::Point(0, y1), cv::Point(x1, y2), cv::Scalar(0, 0, 0), -1);
+        // Right rectangle
+        rectangle(_rgb_clone, cv::Point(x2, y1), cv::Point(_rgb.cols, y2), cv::Scalar(0, 0, 0), -1);
+
+        _rgb = _rgb_clone;
+
+        /*
+        // Display the result
+        imshow("Original Image", _rgb);
+        waitKey(0);
+        */
 
         if (current_index < frames_json["frames"].size()) {
           const auto &frame = frames_json["frames"][current_index];
@@ -672,18 +726,12 @@ public:
 
             int jj = 0;
             for (const auto &joint_position : body["joint_positions"]) {
-              _keypoints_listTOF[jj].x = joint_position[0];
-              _keypoints_listTOF[jj].y = joint_position[1];
-              _keypoints_listTOF[jj].z = joint_position[2];
+              _keypoints_list_azure[jj].x = joint_position[0];
+              _keypoints_list_azure[jj].y = joint_position[1];
+              _keypoints_list_azure[jj].z = joint_position[2];
               jj++;
             }
 
-            // std::cout << "joints first body " << frame_id << " (total 18
-            // joints):" << std::endl; for (const auto& point :
-            // _keypoints_listTOF) {
-            //     std::cout << "(" << point.x << ", " << point.y << ", " <<
-            //     point.z << ")" << std::endl;
-            // }
           } else {
             std::cerr << "ERROR: No body. " << frame_id << std::endl;
             return return_type::error;
@@ -691,7 +739,7 @@ public:
         }
 
         current_index++;
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        //std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         if (current_index >= image_files.size()) {
           cout << "INFO: Reached the end of the image list. Stopping..."
@@ -704,7 +752,12 @@ public:
       }
 
     } else {
+      
+      // reset the start time
+      _start_time = chrono::steady_clock::now();
+
 #ifdef KINECT_AZURE
+
       // acquire and translate into _rgb and _rgbd
       const clock_t begin_time = clock();
 
@@ -749,7 +802,7 @@ public:
       // Debug function to save the point cloud in a .ply file
       // point_cloud_color_to_depth(_pc_transformation, depth_handle,
       // color_handle, "../plugin_skeletonizer_3D/test.ply");
-#else
+#elif __linux
       if (is_raspberry_pi()) {
         _camera.getVideoFrame(_rgb, 100);
       }else{
@@ -767,7 +820,6 @@ public:
         cv::resize(_rgb, _rgb, cv::Size(_rgb_width, _rgb_height));
       }
     }
-    _start_time = chrono::steady_clock::now();
 
     return return_type::success;
   }
@@ -784,6 +836,10 @@ public:
    * @return result status ad defined in return_type
    */
   return_type skeleton_from_depth_compute(bool debug = false) {
+    if (_dummy) {
+      // If dummy, I don't compute the skeleton
+      return return_type::success;
+    }
 #ifdef KINECT_AZURE
 
     if (!_tracker.enqueue_capture(_k4a_rgbd)) {
@@ -797,7 +853,6 @@ public:
       // Only take one body (always the first one)
       k4abt_body_t body = _body_frame.get_body(0);
 
-      _skeleton3D.clear();
       for (const auto &[index, keypoint_name] : keypoints_map_azure) {
         k4a_float3_t position = body.skeleton.joints[index].position;
 
@@ -809,12 +864,13 @@ public:
         _skeleton3D[keypoint_name] = keypoint_data;
       }
 
+      // Map the 3D keypoints to the 2D keypoints
       for (int i = 0; i < 18; ++i) {
-        std::string keypoint_name_tmp = keypoints_map[i];
+        std::string keypoint_name_tmp = keypoints_map_openpose[i];
         for (const auto &[index, keypoint_azure_name] : keypoints_map_azure) {
           if (keypoint_azure_name == keypoint_name_tmp) {
             k4a_float3_t position = body.skeleton.joints[index].position;
-            _keypoints_listTOF[i] =
+            _keypoints_list_azure[i] =
                 cv::Point3f(position.v[0], position.v[1], position.v[2]);
             break;
           }
@@ -858,6 +914,10 @@ public:
    * @return result status ad defined in return_type
    */
   return_type point_cloud_filter(bool debug = false) {
+    if (_dummy) {
+      // If dummy, I don't filter the point cloud
+      return return_type::success;
+    }
 
 #ifdef KINECT_AZURE
     // get the body index map from _k4a_rgbd
@@ -994,6 +1054,7 @@ public:
       renderHumanPose(_result->asRef<HumanPoseResult>(), _output_transform);
     }
     _frames_processed++;
+
     return return_type::success;
   }
 
@@ -1012,16 +1073,18 @@ public:
 
     size_t n_pixel = 10; // of how many pixels I move
 
-    _keypoints_list.clear();
-    _keypoints_cov.resize(HPEOpenPose::keypointsNumber);
-    _keypoints_cov.clear();
-    _poses.clear();
-    _poses = _result->asRef<HumanPoseResult>().poses;
-    // cout << "poses.size()-----> " << _poses.size() << endl;
-    if (_poses.size() > 0) { // at least one person
+    _keypoints_list_openpose.clear();
+    _keypoints_cov_openpose.resize(HPEOpenPose::keypointsNumber);
+    _keypoints_cov_openpose.clear();
+    _poses_openpose.clear();
+    _poses_openpose = _result->asRef<HumanPoseResult>().poses;
 
+
+    // cout << "poses.size()-----> " << _poses_openpose.size() << endl;
+    if (_poses_openpose.size() > 0) { // at least one person
+      /*
       for (auto &keypoint :
-           _poses[0].keypoints) { // if I have more than one person, I take the
+           _poses_openpose[0].keypoints) { // if I have more than one person, I take the
         // first with id[0]
 
         if (keypoint.x > _rgb_width) {
@@ -1030,40 +1093,77 @@ public:
         if (keypoint.y > _rgb_height) {
           keypoint.y = _rgb_height - 1;
         }
-        _keypoints_list.push_back(cv::Point2i(
+        _keypoints_list_openpose.push_back(cv::Point2i(
             keypoint.x,
             keypoint.y)); // I always have 18 keypoints, if there is no (-1,-1)
       }
+      */
+
+        cv::Point2i center(_rgb_width / 2, _rgb_height / 2);
+        int closest_person_index = -1;
+        double min_distance = std::numeric_limits<double>::max();
+
+        for (size_t i = 0; i < _poses_openpose.size(); ++i) {
+            double total_distance = 0.0;
+            int valid_keypoints = 0;
+
+            for (const auto &keypoint : _poses_openpose[i].keypoints) {
+                if (keypoint.x >= 0 && keypoint.y >= 0) {
+                    double distance = std::sqrt(std::pow(keypoint.x - center.x, 2) + std::pow(keypoint.y - center.y, 2));
+                    total_distance += distance;
+                    ++valid_keypoints;
+                }
+            }
+
+            if (valid_keypoints > 0) {
+                double average_distance = total_distance / valid_keypoints;
+                if (average_distance < min_distance) {
+                    min_distance = average_distance;
+                    closest_person_index = i;
+                }
+            }
+        }
+
+      if (closest_person_index != -1) {
+            for (auto &keypoint : _poses_openpose[closest_person_index].keypoints) {
+                if (keypoint.x > _rgb_width) {
+                    keypoint.x = _rgb_width - 1;
+                }
+                if (keypoint.y > _rgb_height) {
+                    keypoint.y = _rgb_height - 1;
+                }
+                _keypoints_list_openpose.push_back(cv::Point2i(keypoint.x, keypoint.y));
+            }
 
       for (int ii = 0; ii < HPEOpenPose::keypointsNumber; ii++) {
 
-        if (_keypoints_list[ii].x > 0 && _keypoints_list[ii].y > 0) {
+        if (_keypoints_list_openpose[ii].x > 0 && _keypoints_list_openpose[ii].y > 0) {
 
-          if (_keypoints_list[ii].y < n_pixel) {
-            _keypoints_list[ii].y = n_pixel;
-          } else if (_keypoints_list[ii].y >= _rgb_height - n_pixel) {
-            _keypoints_list[ii].y = _rgb_height - n_pixel - 1;
+          if (_keypoints_list_openpose[ii].y < n_pixel) {
+            _keypoints_list_openpose[ii].y = n_pixel;
+          } else if (_keypoints_list_openpose[ii].y >= _rgb_height - n_pixel) {
+            _keypoints_list_openpose[ii].y = _rgb_height - n_pixel - 1;
           }
 
-          if (_keypoints_list[ii].x < n_pixel) {
-            _keypoints_list[ii].x = n_pixel;
-          } else if (_keypoints_list[ii].x >= _rgb_width - n_pixel) {
-            _keypoints_list[ii].x = _rgb_width - n_pixel - 1;
+          if (_keypoints_list_openpose[ii].x < n_pixel) {
+            _keypoints_list_openpose[ii].x = n_pixel;
+          } else if (_keypoints_list_openpose[ii].x >= _rgb_width - n_pixel) {
+            _keypoints_list_openpose[ii].x = _rgb_width - n_pixel - 1;
           }
 
           cv::Mat _heat_map = _result->asRef<HumanPoseResult>().heatMaps[ii];
           cv::resize(_heat_map, _heat_map, cv::Size(_rgb_width, _rgb_height));
 
-          data_t H_ri_ci = _heat_map.at<data_t>(_keypoints_list[ii].y,
-                                                _keypoints_list[ii].x);
+          data_t H_ri_ci = _heat_map.at<data_t>(_keypoints_list_openpose[ii].y,
+                                                _keypoints_list_openpose[ii].x);
           data_t H_ri_ciPLUSn = _heat_map.at<data_t>(
-              _keypoints_list[ii].y, _keypoints_list[ii].x + n_pixel);
+              _keypoints_list_openpose[ii].y, _keypoints_list_openpose[ii].x + n_pixel);
           data_t H_ri_ciMINn = _heat_map.at<data_t>(
-              _keypoints_list[ii].y, _keypoints_list[ii].x - n_pixel);
+              _keypoints_list_openpose[ii].y, _keypoints_list_openpose[ii].x - n_pixel);
           data_t H_riPLUSn_ci = _heat_map.at<data_t>(
-              _keypoints_list[ii].y + n_pixel, _keypoints_list[ii].x);
+              _keypoints_list_openpose[ii].y + n_pixel, _keypoints_list_openpose[ii].x);
           data_t H_riMINn_ci = _heat_map.at<data_t>(
-              _keypoints_list[ii].y - n_pixel, _keypoints_list[ii].x);
+              _keypoints_list_openpose[ii].y - n_pixel, _keypoints_list_openpose[ii].x);
 
           data_t H22 = (1.0 / (n_pixel * n_pixel)) *
                        (H_ri_ciPLUSn - 2 * H_ri_ci + H_ri_ciMINn);
@@ -1071,13 +1171,13 @@ public:
                        (H_riPLUSn_ci - 2 * H_ri_ci + H_riMINn_ci);
 
           data_t H_riMINn_ciMINn = _heat_map.at<data_t>(
-              _keypoints_list[ii].y - n_pixel, _keypoints_list[ii].x - n_pixel);
+              _keypoints_list_openpose[ii].y - n_pixel, _keypoints_list_openpose[ii].x - n_pixel);
           data_t H_riMINn_ciPLUSn = _heat_map.at<data_t>(
-              _keypoints_list[ii].y - n_pixel, _keypoints_list[ii].x + n_pixel);
+              _keypoints_list_openpose[ii].y - n_pixel, _keypoints_list_openpose[ii].x + n_pixel);
           data_t H_riPLUSn_ciMINn = _heat_map.at<data_t>(
-              _keypoints_list[ii].y + n_pixel, _keypoints_list[ii].x - n_pixel);
+              _keypoints_list_openpose[ii].y + n_pixel, _keypoints_list_openpose[ii].x - n_pixel);
           data_t H_riPLUSn_ciPLUSn = _heat_map.at<data_t>(
-              _keypoints_list[ii].y + n_pixel, _keypoints_list[ii].x + n_pixel);
+              _keypoints_list_openpose[ii].y + n_pixel, _keypoints_list_openpose[ii].x + n_pixel);
 
           data_t H12 = (1.0 / (4 * n_pixel * n_pixel)) *
                        (H_riPLUSn_ciPLUSn - H_riPLUSn_ciMINn -
@@ -1088,7 +1188,7 @@ public:
           A << H11, H12, H21, H22;
 
           Eigen::Matrix2f C = A.inverse();
-          _cov2D.push_back(C);
+          _cov2D_vec.push_back(C);
           Eigen::EigenSolver<Eigen::Matrix2f> s(C); // the instance s(C)
                                                     // includes the eigensystem
 
@@ -1102,15 +1202,15 @@ public:
           complex<data_t> V21_tmp = s.eigenvectors()(1, 0);
           data_t V21 = V21_tmp.real();
 
-          data_t perc_prob = 0.95;
+          data_t perc_prob = 0.68; // standard confidence interval
           data_t xradius = sqrt(-D11 * (-2) * log(1 - perc_prob));
           data_t yradius = sqrt(-D22 * (-2) * log(1 - perc_prob));
 
           data_t alpha = atan2(V21, V11);
 
-          _keypoints_cov[ii].x = xradius;
-          _keypoints_cov[ii].y = yradius;
-          _keypoints_cov[ii].z = alpha;
+          _keypoints_cov_openpose[ii].x = xradius;
+          _keypoints_cov_openpose[ii].y = yradius;
+          _keypoints_cov_openpose[ii].z = alpha;
 
           if (debug) {
             vector<data_t> theta;
@@ -1130,16 +1230,16 @@ public:
             for (int j = 0; j < x_ellips.size(); j++) {
               data_t element_1 =
                   (cos(alpha) * x_ellips[j] + (-sin(alpha)) * y_ellips[j]) +
-                  _keypoints_list[ii].x;
+                  _keypoints_list_openpose[ii].x;
               data_t element_2 =
                   (sin(alpha) * x_ellips[j] + cos(alpha) * y_ellips[j]) +
-                  _keypoints_list[ii].y;
+                  _keypoints_list_openpose[ii].y;
               ellipse_points.push_back(cv::Point2f(element_1, element_2));
             }
 
             // Draw keypoints
             cv::circle(_rgb,
-                       cv::Point(_keypoints_list[ii].x, _keypoints_list[ii].y),
+                       cv::Point(_keypoints_list_openpose[ii].x, _keypoints_list_openpose[ii].y),
                        5, cv::Scalar(0, 255, 0), cv::FILLED);
 
             // Draw ellipse points
@@ -1165,14 +1265,12 @@ public:
         } else {
           Eigen::Matrix2f A_NaN;
           A_NaN << -1, -1, -1, -1;
-          _cov2D.push_back(A_NaN);
+          _cov2D_vec.push_back(A_NaN);
         }
+      }
       }
     }
 
-    // cout << "_cov2D.size(): " << _cov2D.size() << endl; // now 18 if a person
-    // exist _cov2D.clear(); cout << "_keypoints_list.size(): " <<
-    // _keypoints_list.size() << endl;
 
     return return_type::success;
   }
@@ -1193,18 +1291,18 @@ public:
   return_type cov3D_compute(bool debug = false) {
 
     if (_dummy) {
-      if (_keypoints_list.size() > 0) { // at least one person
-        for (size_t i = 0; i < _cov2D.size(); ++i) {
-          Eigen::Matrix2f _cov2D_TMP = _cov2D[i];
+      if (_keypoints_list_openpose.size() > 0) { // at least one person
+        for (size_t i = 0; i < _cov2D_vec.size(); ++i) {
+          Eigen::Matrix2f _cov2D_vec_TMP = _cov2D_vec[i];
 
-          if (!(_keypoints_listTOF[i].x == -1 &&
-                _keypoints_listTOF[i].y == -1 &&
-                _keypoints_listTOF[i].z == -1) &&
-              !(_cov2D_TMP.array() == -1).all()) {
+          if (!(_keypoints_list_azure[i].x == -1 &&
+                _keypoints_list_azure[i].y == -1 &&
+                _keypoints_list_azure[i].z == -1) &&
+              !(_cov2D_vec_TMP.array() == -1).all()) {
 
-            float Z_tmp = _keypoints_listTOF[i].z;
+            float Z_tmp = _keypoints_list_azure[i].z;
             float sigma_z =
-                (_keypoints_listTOF[i].z /
+                (_keypoints_list_azure[i].z /
                  1000); // TO DO CHECK A GOOD MODEL 0.015 * Z_tmp + 2;
             float variance_z = sigma_z * sigma_z;
 
@@ -1214,22 +1312,23 @@ public:
             Eigen::Matrix3f covMatrixZ;
             covMatrixZ << 0, 0, 0, 0, 0, 0, 0, 0, variance_z;
 
-            Eigen::Matrix3f covMatrix3D =
-                J * _cov2D_TMP * J.transpose() + covMatrixZ;
-            _cov3D.push_back(covMatrix3D);
+            Eigen::Matrix3f covMatrix3D = J * _cov2D_vec_TMP * J.transpose() + covMatrixZ;
+            _cov3D_vec.push_back(covMatrix3D);
+            _cov3D[keypoints_map_openpose[i]] = covMatrix3D; // store the 3D covariance matrix in the map
           } else {
             Eigen::Matrix3f covMatrixZ_NaN;
             covMatrixZ_NaN.setConstant(-1);
-            _cov3D.push_back(covMatrixZ_NaN);
+            _cov3D_vec.push_back(covMatrixZ_NaN);
+            _cov3D[keypoints_map_openpose[i]] = covMatrixZ_NaN; // store the 3D covariance matrix in the map
           }
         }
       }
 
       // SAVE
-      json json_cov3D;
+      json json_cov3D_vec;
       std::ifstream input_file("cov3D_data.json");
       if (input_file.is_open()) {
-        input_file >> json_cov3D;
+        input_file >> json_cov3D_vec;
         input_file.close();
       }
 
@@ -1239,12 +1338,12 @@ public:
       frame_data["frame"] = frame_counter;
       json cov_matrix_list;
 
-      for (size_t i = 0; i < _cov3D.size(); ++i) {
+      for (size_t i = 0; i < _cov3D_vec.size(); ++i) {
         json cov_matrix_3x3;
 
         for (int row = 0; row < 3; ++row) {
           cov_matrix_3x3.push_back(
-              {_cov3D[i](row, 0), _cov3D[i](row, 1), _cov3D[i](row, 2)});
+              {_cov3D_vec[i](row, 0), _cov3D_vec[i](row, 1), _cov3D_vec[i](row, 2)});
         }
 
         cov_matrix_list.push_back(cov_matrix_3x3);
@@ -1252,36 +1351,30 @@ public:
 
       frame_data["cov3D"] = cov_matrix_list;
 
-      json_cov3D.push_back(frame_data);
+      json_cov3D_vec.push_back(frame_data);
 
       std::ofstream output_file("cov3D_data.json");
-      output_file << json_cov3D.dump(4);
+      output_file << json_cov3D_vec.dump(4);
       output_file.close();
 
       frame_counter++;
 
-      // CLEAN
-      _cov2D.clear();
-      _cov3D.clear();
-
     } else {
 #ifdef KINECT_AZURE
 
-      float _f_x =
-          100; // CHECK HOW TO DO colorAzure_intrinsics.parameters.param.fx;
-      float _f_y =
-          100; // CHECK HOW TO DO colorAzure_intrinsics.parameters.param.fy;
+      float _f_x = 504.94; // CHECK HOW TO DO colorAzure_intrinsics.parameters.param.fx;
+      float _f_y = 505.044; // CHECK HOW TO DO colorAzure_intrinsics.parameters.param.fy;
 
-      if (_keypoints_list.size() > 0) { // at least one person
-        for (size_t i = 0; i < _cov2D.size(); ++i) {
-          Eigen::Matrix2f _cov2D_TMP = _cov2D[i];
+      if (_keypoints_list_openpose.size() > 0) { // at least one person
+        for (size_t i = 0; i < _cov2D_vec.size(); ++i) {
+          Eigen::Matrix2f _cov2D_vec_TMP = _cov2D_vec[i];
 
-          if (!(_keypoints_listTOF[i].x == -1 &&
-                _keypoints_listTOF[i].y == -1 &&
-                _keypoints_listTOF[i].z == -1) &&
-              !(_cov2D_TMP.array() == -1).all()) {
+          if (!(_keypoints_list_azure[i].x == -1 &&
+                _keypoints_list_azure[i].y == -1 &&
+                _keypoints_list_azure[i].z == -1) &&
+              !(_cov2D_vec_TMP.array() == -1).all()) {
 
-            float Z_tmp = _keypoints_listTOF[i].z;
+            float Z_tmp = _keypoints_list_azure[i].z;
             float sigma_z = 0.015 * Z_tmp + 2; // KINECT AZURE model
             float variance_z = sigma_z * sigma_z;
 
@@ -1291,19 +1384,17 @@ public:
             Eigen::Matrix3f covMatrixZ;
             covMatrixZ << 0, 0, 0, 0, 0, 0, 0, 0, variance_z;
 
-            Eigen::Matrix3f covMatrix3D =
-                J * _cov2D_TMP * J.transpose() + covMatrixZ;
-            _cov3D.push_back(covMatrix3D);
+            Eigen::Matrix3f covMatrix3D = J * _cov2D_vec_TMP * J.transpose() + covMatrixZ;
+            _cov3D_vec.push_back(covMatrix3D);
+            _cov3D[keypoints_map_openpose[i]] = covMatrix3D; // store the 3D covariance matrix in the map
           } else {
             Eigen::Matrix3f covMatrixZ_NaN;
             covMatrixZ_NaN.setConstant(-1);
-            _cov3D.push_back(covMatrixZ_NaN);
+            _cov3D_vec.push_back(covMatrixZ_NaN);
+            _cov3D[keypoints_map_openpose[i]] = covMatrixZ_NaN; // store the 3D covariance matrix in the map
           }
         }
       }
-
-      _cov2D.clear(); // before clean databese
-      _cov3D.clear();
 
 #else
 
@@ -1330,51 +1421,51 @@ public:
           500; // Real "height" of the selected person in mm between nec and hip
       float sigmaHp = 2; // mm
 
-      if (_keypoints_list.size() > 0) { // at least one person
-        if (((_keypoints_list[2].y > 0) || (_keypoints_list[5].y > 0)) &&
-            ((_keypoints_list[8].y > 0) ||
-             (_keypoints_list[11].y >
+      if (_keypoints_list_openpose.size() > 0) { // at least one person
+        if (((_keypoints_list_openpose[2].y > 0) || (_keypoints_list_openpose[5].y > 0)) &&
+            ((_keypoints_list_openpose[8].y > 0) ||
+             (_keypoints_list_openpose[11].y >
               0))) { // 2 = SHOR      5 = SHOL     8 = HIPR       11 = HIPL
 
           float v_sho_tmp;
           float v_sho;
           Eigen::Matrix2f cov2D_SHO;
-          if (_keypoints_list[2].y > 0 && _keypoints_list[5].y > 0) {
+          if (_keypoints_list_openpose[2].y > 0 && _keypoints_list_openpose[5].y > 0) {
             v_sho_tmp =
-                fabs(_keypoints_list[2].y - _keypoints_list[5].y) / 2.0f;
-            if (_keypoints_list[2].y < _keypoints_list[5].y) {
-              v_sho = v_sho_tmp + _keypoints_list[2].y;
+                fabs(_keypoints_list_openpose[2].y - _keypoints_list_openpose[5].y) / 2.0f;
+            if (_keypoints_list_openpose[2].y < _keypoints_list_openpose[5].y) {
+              v_sho = v_sho_tmp + _keypoints_list_openpose[2].y;
             } else {
-              v_sho = v_sho_tmp + _keypoints_list[5].y;
+              v_sho = v_sho_tmp + _keypoints_list_openpose[5].y;
             }
-            cov2D_SHO = (_cov2D[2] + _cov2D[5]) / 2.0;
-          } else if (_keypoints_list[2].y > 0) {
-            v_sho = _keypoints_list[2].y;
-            cov2D_SHO = _cov2D[2];
+            cov2D_SHO = (_cov2D_vec[2] + _cov2D_vec[5]) / 2.0;
+          } else if (_keypoints_list_openpose[2].y > 0) {
+            v_sho = _keypoints_list_openpose[2].y;
+            cov2D_SHO = _cov2D_vec[2];
           } else {
-            v_sho = _keypoints_list[5].y;
-            cov2D_SHO = _cov2D[5];
+            v_sho = _keypoints_list_openpose[5].y;
+            cov2D_SHO = _cov2D_vec[5];
           }
           float variance_shoY = cov2D_SHO(1, 1);
 
           float v_hip_tmp;
           float v_hip;
           Eigen::Matrix2f cov2D_HIP;
-          if (_keypoints_list[8].y > 0 && _keypoints_list[11].y > 0) {
+          if (_keypoints_list_openpose[8].y > 0 && _keypoints_list_openpose[11].y > 0) {
             v_hip_tmp =
-                fabs(_keypoints_list[8].y - _keypoints_list[11].y) / 2.0f;
-            if (_keypoints_list[8].y < _keypoints_list[11].y) {
-              v_hip = v_hip_tmp + _keypoints_list[8].y;
+                fabs(_keypoints_list_openpose[8].y - _keypoints_list_openpose[11].y) / 2.0f;
+            if (_keypoints_list_openpose[8].y < _keypoints_list_openpose[11].y) {
+              v_hip = v_hip_tmp + _keypoints_list_openpose[8].y;
             } else {
-              v_hip = v_hip_tmp + _keypoints_list[11].y;
+              v_hip = v_hip_tmp + _keypoints_list_openpose[11].y;
             }
-            cov2D_HIP = (_cov2D[11] + _cov2D[8]) / 2.0;
-          } else if (_keypoints_list[8].y > 0) {
-            v_hip = _keypoints_list[8].y;
-            cov2D_HIP = _cov2D[8];
+            cov2D_HIP = (_cov2D_vec[11] + _cov2D_vec[8]) / 2.0;
+          } else if (_keypoints_list_openpose[8].y > 0) {
+            v_hip = _keypoints_list_openpose[8].y;
+            cov2D_HIP = _cov2D_vec[8];
           } else {
-            v_hip = _keypoints_list[11].y;
-            cov2D_HIP = _cov2D[11];
+            v_hip = _keypoints_list_openpose[11].y;
+            cov2D_HIP = _cov2D_vec[11];
           }
           float variance_hipY = cov2D_HIP(1, 1);
 
@@ -1382,8 +1473,8 @@ public:
 
           // cout << "Z---------->    " << Z << endl;
 
-          for (size_t i = 0; i < _cov2D.size(); ++i) {
-            Eigen::Matrix2f cov2D_TMP = _cov2D[i];
+          for (size_t i = 0; i < _cov2D_vec.size(); ++i) {
+            Eigen::Matrix2f cov2D_TMP = _cov2D_vec[i];
             if (!(cov2D_TMP.array() == -1).all()) {
               Eigen::Matrix<float, 3, 2> J;
               J << Z / _f_x, 0, 0, Z / _f_y, 0, 0;
@@ -1402,18 +1493,17 @@ public:
 
               Eigen::Matrix3f covMatrix3D =
                   J * cov2D_TMP * J.transpose() + covMatrixZ;
-              _cov3D.push_back(covMatrix3D);
+              _cov3D_vec.push_back(covMatrix3D);
+              _cov3D[keypoints_map_openpose[i]] = covMatrix3D; // store the 3D covariance matrix in the map
             } else {
               Eigen::Matrix3f covMatrixZ_NaN;
               covMatrixZ_NaN.setConstant(-1);
-              _cov3D.push_back(covMatrixZ_NaN);
+              _cov3D_vec.push_back(covMatrixZ_NaN);
+              _cov3D[keypoints_map_openpose[i]] = covMatrixZ_NaN; // store the 3D covariance matrix in the map
             }
           }
         }
       }
-
-      _cov2D.clear(); // TO DO: move it in get_output after database saving
-      _cov3D.clear();
 
 #endif
     }
@@ -1453,6 +1543,10 @@ public:
     Source::set_params(params);
     _params.merge_patch(*(json *)params);
 
+    if (is_kinect()){
+      std::cout << "\033[32mKinect Azure device found!\033[0m" << std::endl;
+    }
+
     //_params = *(json *)params;
     if (_params.contains("camera_device")) {
       _camera_device = _params["camera_device"];
@@ -1476,6 +1570,17 @@ public:
       _dummy = _params["dummy"];
     }
 
+    // Set the map of the OpenPose keypoints to the Azure keypoints
+    for (int i = 0; i < keypoints_map_openpose.size()-1; ++i) {
+        std::string keypoint_name_tmp = keypoints_map_openpose[i];
+        for (const auto &[index, keypoint_azure_name] : keypoints_map_azure) {
+          if (keypoint_azure_name == keypoint_name_tmp) {
+            _keypoints_openpose_to_azure[index] = i;
+            break;
+          }
+        }
+      }
+    
     setup_VideoCapture();
     setup_OpenPoseModel();
     setup_Pipeline();
@@ -1496,11 +1601,13 @@ public:
 
     out.clear();
     out["agent_id"] = _agent_id;
+    out["ts"] = std::chrono::duration_cast<std::chrono::nanoseconds>(_start_time.time_since_epoch()).count(); 
 
     if (acquire_frame(_dummy) == return_type::error) {
       return return_type::error;
     }
 
+    
     if (skeleton_from_depth_compute(
             _params["debug"]["skeleton_from_depth_compute"]) ==
         return_type::error) {
@@ -1511,6 +1618,7 @@ public:
         return_type::error) {
       return return_type::error;
     }
+    
 
     if (skeleton_from_rgb_compute(
             _params["debug"]["skeleton_from_rgb_compute"]) ==
@@ -1573,6 +1681,8 @@ public:
       max_depth = 2000;
 #endif
 
+if (!_dummy) {
+
 #ifdef KINECT_AZURE
       Mat rgbd_flipped;
       flip(_rgbd_filtered, rgbd_flipped, 1);
@@ -1582,37 +1692,88 @@ public:
                     COLORMAP_HSV); // Apply the colormap:
       imshow("rgbd", rgbd_flipped_color);
 #endif
+      }
+
 
       int key = cv::waitKey(1000.0 / _fps);
 
+
       // system("pause");
       if (27 == key || 'q' == key || 'Q' == key) { // Esc
+
 #ifdef KINECT_AZURE
         _device.close();
-#else
+#elif __linux
         if (is_raspberry_pi()) {
           _camera.stopVideo();
         }
         _cap.release();
 #endif
+
         destroyAllWindows();
 
         return return_type::error;
       }
     }
 
-    // Prepare output
+    // Prepare output 
+    // the json definition is on the google doc: https://docs.google.com/document/d/1IRs9VA9gGh8CmGIK8cRInYrMCY8cF8FMGC5H8DoonJI
 
-    if (_poses.size() > 0) {
-      for (int kp = 0; kp < HPEOpenPose::keypointsNumber; kp++) {
-        if (_keypoints_list[kp].x < 0 || _keypoints_list[kp].y < 0)
+    // Use maps to convert from keypoints lists to  _skeleton3D and _cov3D
+    // _skeleton3D is already in the right format, so we can use it directly
+    // _cov3D_vec is a vector of matrices, so we need to convert it to a MAP in _cov3D
+
+    // Prepare the output json
+    if (_poses_openpose.size() > 0) {
+      out["typ"] = "3D";
+      for (int kp = 0; kp < _keypoints_list_openpose.size(); kp++) {
+        if (_keypoints_list_openpose[kp].x < 0 || _keypoints_list_openpose[kp].y < 0)
           continue;
-        out["poses"][keypoints_map[kp]] = {_keypoints_list[kp].x,
-                                           _keypoints_list[kp].y};
-        out["cov"][keypoints_map[kp]] = {
-            _keypoints_cov[kp].x, _keypoints_cov[kp].y, _keypoints_cov[kp].z};
+        
+          //check if azure is used
+        if (is_kinect()) {
+          
+          out[keypoints_map_openpose[kp]]["ncm"] = 1; // number of cameras used, constantantly 1 for one HPE plugin
+
+          out[keypoints_map_openpose[kp]]["crd"] = _skeleton3D[keypoints_map_openpose[kp]];
+         
+          out[keypoints_map_openpose[kp]]["unc"] = 
+            {
+              _cov3D[keypoints_map_openpose[kp]](0, 0),   // Ux
+              _cov3D[keypoints_map_openpose[kp]](1, 1),   // Uy
+              _cov3D[keypoints_map_openpose[kp]](2, 2),   // Uz
+              _cov3D[keypoints_map_openpose[kp]](0, 1),   // Uxy
+              _cov3D[keypoints_map_openpose[kp]](0, 2),   // Uxz
+              _cov3D[keypoints_map_openpose[kp]](1, 2)    // Uyz
+            }; 
+
+        }else{
+          //used ony RGB inference
+
+          //TODO: CONVERTIRE I PUNTI IN 3D!!!! Usare la matrice di calibrazione (ALE LUCHETTI)
+          
+          out["typ"] = "2D";
+
+          out[keypoints_map_openpose[kp]]["crd"] = {
+            _keypoints_list_openpose[kp].x,
+            _keypoints_list_openpose[kp].y};
+
+          out[keypoints_map_openpose[kp]]["unc"] = {
+            _keypoints_cov_openpose[kp].x,
+            _keypoints_cov_openpose[kp].y,
+            _keypoints_cov_openpose[kp].z
+          };
+
+        }
       }
     }
+
+    // clear the fields for the next frame
+    _skeleton2D.clear();
+    _skeleton3D.clear(); 
+    _cov3D.clear();
+    _cov2D_vec.clear();
+    _cov3D_vec.clear();
 
     // store the output in the out parameter json and the point cloud in the
     // blob parameter
@@ -1645,18 +1806,17 @@ public:
 protected:
   Mat _rgbd;          /**< the last RGBD frame */
   Mat _rgb;           /**< the last RGB frame */
-  Mat _rgbd_filtered; /**< the last RGBD frame filtered with the body index
-                         mask*/
-  map<string, vector<unsigned char>>
-      _skeleton2D; /**< the skeleton from 2D cameras only*/
-  map<string, vector<float>>
-      _skeleton3D;       /**< the skeleton from 3D cameras only*/
+  Mat _rgbd_filtered; /**< the last RGBD frame filtered with the body index mask*/
+
+  map<string, vector<unsigned char>> _skeleton2D; /**< the skeleton from 2D cameras only*/
+  map<string, vector<float>> _skeleton3D;       /**< the skeleton from 3D cameras only*/
+  map<string, Eigen::Matrix3f> _cov3D; /**< the 3D covariance matrix */      
+  
   vector<Mat> _heatmaps; /**< the joints heatmaps */
   Mat _point_cloud;      /**< the filtered body point cloud */
-  std::vector<Eigen::Matrix2f> _cov2D;
-  std::vector<Eigen::Matrix3f> _cov3D;
-  // Mat _cov3D;            /**< the 3D covariance matrix */
-  Mat _cov3D_adj; /**< the adjusted 3D covariance matrix */
+
+  std::vector<Eigen::Matrix2f> _cov2D_vec; /**< the 2D covariance matrix vector */
+  std::vector<Eigen::Matrix3f> _cov3D_vec; /**< the 3D covariance matrix vector */
   json _params;   /**< the parameters of the plugin */
 
   uint32_t _tsize = 0;              /**< target size*/
@@ -1675,21 +1835,21 @@ protected:
   float _c_x; // coordinate of the principal point
   float _c_y;
 
-  bool _dummy = false;
+  bool _dummy = false; /**< if true, the plugin does not acquire images from camera but SIMULATES A 3D Skeleton */
 
 #ifdef __linux
   lccv::PiCamera _camera; // for Raspi
 #endif
+
   int _camera_device = 0;
   data_t _fps = 25;
   string _resolution_rgb = "";
   int _rgb_height; /**< image size rows */
   int _rgb_width;  /**< image size cols */
-  vector<cv::Point2i> _keypoints_list;
-  cv::Point3f _keypoints_listTOF[18];
-  // vector<cv::Point3f> _keypoints_listTOF = vector<cv::Point3f>(18,
-  // cv::Point3f(-1, -1, -1));
-  vector<cv::Point3f> _keypoints_cov;
+  map<int, int> _keypoints_openpose_to_azure; /**< map of the OpenPose keypoints to the Azure keypoints */
+  vector<cv::Point2i> _keypoints_list_openpose;
+  cv::Point3f _keypoints_list_azure[18];
+  vector<cv::Point3f> _keypoints_cov_openpose;
   string _model_file;
   string _agent_id;
   VideoCapture _cap;
@@ -1712,8 +1872,7 @@ protected:
   OutputTransform _output_transform;
   unique_ptr<ModelBase> _model;
   AsyncPipeline *_pipeline;
-  vector<HumanPose>
-      _poses; /**<  contains all the keypoints of all identified people */
+  vector<HumanPose> _poses_openpose; /**<  contains all the keypoints of all identified people */
 };
 
 /*
@@ -1778,7 +1937,7 @@ int main(int argc, char const *argv[]) {
       // Every second calculate FPS and reset timer
       if (duration >= 1) {
         fps = frame_count / duration;
-        cout << "-----------------> FPS: " << fps << endl;
+        // cout << "-----------------> FPS: " << fps << endl;
 
         start_time = now;
         frame_count = 0;

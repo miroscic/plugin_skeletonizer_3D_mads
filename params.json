@@ -6,7 +6,7 @@
     "fps": 25,
     "dummy": true,
     "debug": {
-        "skeleton_from_depth_compute": false,
+        "skeleton_from_depth_compute": true,
         "skeleton_from_rgb_compute": true,
         "hessian_compute": true,
         "cov3D_compute": true,
